@@ -28,10 +28,11 @@ install_dependencies() {
     case $PACKAGE_MANAGER in
         yum)
             yum install -y iptables
+            systemctl enable iptables 2>/dev/null || true
             ;;
         apt)
             apt update
-            apt install -y iptables
+            DEBIAN_FRONTEND=noninteractive apt install -y iptables iptables-persistent
             ;;
     esac
 
