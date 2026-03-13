@@ -23,6 +23,22 @@ IPTABLES_CONFIG_DIR="/etc/iptables-manager"
 IPTABLES_RULES_FILE="$IPTABLES_CONFIG_DIR/port-forward-rules.txt"
 BACKUP_DIR="/etc/iptables-manager/backup"
 
+# 确保 IPv4 转发已开启
+ensure_ip_forward() {
+    local current=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
+    if [[ "$current" != "1" ]]; then
+        log_warn "IPv4 转发未开启，正在启用..."
+        sysctl -w net.ipv4.ip_forward=1 >/dev/null
+        # 持久化配置
+        if grep -q "^net.ipv4.ip_forward" /etc/sysctl.conf; then
+            sed -i 's/^net.ipv4.ip_forward.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+        else
+            echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+        fi
+        log_success "IPv4 转发已开启并持久化"
+    fi
+}
+
 # 初始化配置目录
 init_config_dir() {
     mkdir -p "$IPTABLES_CONFIG_DIR"
@@ -571,6 +587,7 @@ main() {
     detect_system
     get_iptables_paths
     init_config_dir
+    ensure_ip_forward
 
     # 交互式菜单
     while true; do
