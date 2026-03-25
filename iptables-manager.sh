@@ -250,12 +250,12 @@ remove_port_forward() {
     # 删除iptables规则
     iptables -t nat -D PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port" 2>/dev/null || true
     iptables -t nat -D PREROUTING -p udp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port" 2>/dev/null || true
-    if [[ "$PO0_MODE" == "true" && -n "$LAN_IP" ]]; then
+    # 同时尝试删除 MASQUERADE 和 SNAT 规则，防止模式切换后残留
+    iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+    if [[ -n "$LAN_IP" ]]; then
         iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
         iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
-    else
-        iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
-        iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
     fi
     iptables -D FORWARD -p tcp -d "$target_ip" --dport "$target_port" -j ACCEPT 2>/dev/null || true
     iptables -D FORWARD -p udp -d "$target_ip" --dport "$target_port" -j ACCEPT 2>/dev/null || true
@@ -296,12 +296,12 @@ modify_port_forward() {
     # 删除旧的iptables规则
     iptables -t nat -D PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "$old_target_ip:$old_target_port" 2>/dev/null || true
     iptables -t nat -D PREROUTING -p udp --dport "$local_port" -j DNAT --to-destination "$old_target_ip:$old_target_port" 2>/dev/null || true
-    if [[ "$PO0_MODE" == "true" && -n "$LAN_IP" ]]; then
+    # 同时尝试删除 MASQUERADE 和 SNAT 规则，防止模式切换后残留
+    iptables -t nat -D POSTROUTING -p tcp -d "$old_target_ip" --dport "$old_target_port" -j MASQUERADE 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -p udp -d "$old_target_ip" --dport "$old_target_port" -j MASQUERADE 2>/dev/null || true
+    if [[ -n "$LAN_IP" ]]; then
         iptables -t nat -D POSTROUTING -p tcp -d "$old_target_ip" --dport "$old_target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
         iptables -t nat -D POSTROUTING -p udp -d "$old_target_ip" --dport "$old_target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
-    else
-        iptables -t nat -D POSTROUTING -p tcp -d "$old_target_ip" --dport "$old_target_port" -j MASQUERADE 2>/dev/null || true
-        iptables -t nat -D POSTROUTING -p udp -d "$old_target_ip" --dport "$old_target_port" -j MASQUERADE 2>/dev/null || true
     fi
     iptables -D FORWARD -p tcp -d "$old_target_ip" --dport "$old_target_port" -j ACCEPT 2>/dev/null || true
     iptables -D FORWARD -p udp -d "$old_target_ip" --dport "$old_target_port" -j ACCEPT 2>/dev/null || true
@@ -595,12 +595,12 @@ clear_all_forwards() {
             # 删除iptables规则
             iptables -t nat -D PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port" 2>/dev/null || true
             iptables -t nat -D PREROUTING -p udp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port" 2>/dev/null || true
-            if [[ "$PO0_MODE" == "true" && -n "$LAN_IP" ]]; then
+            # 同时尝试删除 MASQUERADE 和 SNAT 规则，防止模式切换后残留
+            iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+            iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+            if [[ -n "$LAN_IP" ]]; then
                 iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
                 iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
-            else
-                iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
-                iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
             fi
             iptables -D FORWARD -p tcp -d "$target_ip" --dport "$target_port" -j ACCEPT 2>/dev/null || true
             iptables -D FORWARD -p udp -d "$target_ip" --dport "$target_port" -j ACCEPT 2>/dev/null || true
@@ -632,21 +632,22 @@ rebuild_all_forwards() {
 
     backup_iptables
 
-    # 用旧模式删除所有 iptables 规则
-    local save_po0="$PO0_MODE"
-    local save_lan="$LAN_IP"
-    PO0_MODE="$old_mode"
-    LAN_IP="$old_lan"
+    # 删除所有 iptables 规则（两种 SNAT 方式都尝试删除）
+    # 删除时需要用旧 LAN_IP 匹配 SNAT 规则
+    local del_lan="$old_lan"
+    if [[ -z "$del_lan" ]]; then
+        del_lan="$LAN_IP"
+    fi
 
     while IFS=':' read -r local_port target_ip target_port; do
         iptables -t nat -D PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port" 2>/dev/null || true
         iptables -t nat -D PREROUTING -p udp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port" 2>/dev/null || true
-        if [[ "$PO0_MODE" == "true" && -n "$LAN_IP" ]]; then
-            iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
-            iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
-        else
-            iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
-            iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+        # 同时尝试删除 MASQUERADE 和 SNAT 规则，防止模式切换后残留
+        iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+        iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+        if [[ -n "$del_lan" ]]; then
+            iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$del_lan" 2>/dev/null || true
+            iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$del_lan" 2>/dev/null || true
         fi
         iptables -D FORWARD -p tcp -d "$target_ip" --dport "$target_port" -j ACCEPT 2>/dev/null || true
         iptables -D FORWARD -p udp -d "$target_ip" --dport "$target_port" -j ACCEPT 2>/dev/null || true
@@ -654,10 +655,7 @@ rebuild_all_forwards() {
         iptables -D FORWARD -p udp -s "$target_ip" --sport "$target_port" -j ACCEPT 2>/dev/null || true
     done < "$IPTABLES_RULES_FILE"
 
-    # 恢复新模式，重新添加所有规则
-    PO0_MODE="$save_po0"
-    LAN_IP="$save_lan"
-
+    # 用当前模式重新添加所有规则
     while IFS=':' read -r local_port target_ip target_port; do
         iptables -t nat -A PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port"
         iptables -t nat -A PREROUTING -p udp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port"
