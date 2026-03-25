@@ -71,6 +71,49 @@ copy_scripts() {
     log_info "脚本文件复制完成"
 }
 
+# 配置 po0 模式
+setup_po0_mode() {
+    log_info "配置 po0 模式..."
+
+    # 确保 gum 可用（从已安装的位置加载）
+    source /opt/iptables-manager/common.sh
+    ensure_gum
+
+    local PO0_MODE="false"
+    local LAN_IP=""
+
+    echo ""
+    if gum_confirm "是否开启 po0 模式？（用于内网 SNAT 转发）"; then
+        PO0_MODE="true"
+        # 检测内网 IP
+        local detected_ip
+        detected_ip=$(ip addr show | grep -oP 'inet 10\.\S+' | head -1 | awk '{print $2}' | cut -d'/' -f1)
+        if [[ -n "$detected_ip" ]]; then
+            LAN_IP="$detected_ip"
+            log_success "检测到内网IP: $LAN_IP"
+        else
+            log_warn "未检测到 10.x 内网IP，请手动输入"
+            LAN_IP=$(gum_input "内网IP" "请输入内网IP地址")
+            if [[ -z "$LAN_IP" ]]; then
+                log_warn "未输入内网IP，po0 模式将关闭"
+                PO0_MODE="false"
+            fi
+        fi
+    fi
+
+    # 写入配置
+    cat > /etc/iptables-manager/config <<EOF
+PO0_MODE=$PO0_MODE
+LAN_IP=$LAN_IP
+EOF
+
+    if [[ "$PO0_MODE" == "true" ]]; then
+        log_success "po0 模式已开启，内网IP: $LAN_IP"
+    else
+        log_info "po0 模式未开启"
+    fi
+}
+
 # 显示安装完成信息
 show_completion_info() {
     echo ""
@@ -106,6 +149,7 @@ main() {
     install_dependencies
     create_directories
     copy_scripts
+    setup_po0_mode
     show_completion_info
 }
 

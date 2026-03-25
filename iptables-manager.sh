@@ -22,6 +22,53 @@ source "$SCRIPT_DIR/common.sh"
 IPTABLES_CONFIG_DIR="/etc/iptables-manager"
 IPTABLES_RULES_FILE="$IPTABLES_CONFIG_DIR/port-forward-rules.txt"
 BACKUP_DIR="/etc/iptables-manager/backup"
+CONFIG_FILE="$IPTABLES_CONFIG_DIR/config"
+
+# po0 模式全局变量
+PO0_MODE="false"
+LAN_IP=""
+
+# 加载配置
+load_config() {
+    PO0_MODE="false"
+    LAN_IP=""
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+    fi
+}
+
+# 保存配置
+save_config() {
+    cat > "$CONFIG_FILE" <<EOF
+PO0_MODE=$PO0_MODE
+LAN_IP=$LAN_IP
+EOF
+}
+
+# 获取内网IP（匹配 10. 开头）
+detect_lan_ip() {
+    local ip
+    ip=$(ip addr show | grep -oP 'inet 10\.\S+' | head -1 | awk '{print $2}' | cut -d'/' -f1)
+    echo "$ip"
+}
+
+# 设置 po0 模式的 LAN IP（检测或手动输入）
+setup_lan_ip() {
+    local detected_ip
+    detected_ip=$(detect_lan_ip)
+    if [[ -n "$detected_ip" ]]; then
+        LAN_IP="$detected_ip"
+        log_success "检测到内网IP: $LAN_IP"
+    else
+        log_warn "未检测到 10.x 内网IP，请手动输入"
+        LAN_IP=$(gum_input "内网IP" "请输入内网IP地址")
+        if [[ -z "$LAN_IP" ]] || ! validate_ip "$LAN_IP"; then
+            log_error "无效的IP地址"
+            LAN_IP=""
+            return 1
+        fi
+    fi
+}
 
 # 确保 IPv4 转发已开启
 ensure_ip_forward() {
@@ -160,8 +207,13 @@ add_port_forward() {
     iptables -t nat -A PREROUTING -p udp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port"
 
     # 添加SNAT规则（源地址转换，确保回包正确返回）
-    iptables -t nat -A POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE
-    iptables -t nat -A POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE
+    if [[ "$PO0_MODE" == "true" && -n "$LAN_IP" ]]; then
+        iptables -t nat -A POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP"
+        iptables -t nat -A POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP"
+    else
+        iptables -t nat -A POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE
+        iptables -t nat -A POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE
+    fi
 
     # 添加FORWARD规则（允许转发）
     iptables -A FORWARD -p tcp -d "$target_ip" --dport "$target_port" -j ACCEPT
@@ -198,8 +250,13 @@ remove_port_forward() {
     # 删除iptables规则
     iptables -t nat -D PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port" 2>/dev/null || true
     iptables -t nat -D PREROUTING -p udp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port" 2>/dev/null || true
-    iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
-    iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+    if [[ "$PO0_MODE" == "true" && -n "$LAN_IP" ]]; then
+        iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
+        iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
+    else
+        iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+        iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+    fi
     iptables -D FORWARD -p tcp -d "$target_ip" --dport "$target_port" -j ACCEPT 2>/dev/null || true
     iptables -D FORWARD -p udp -d "$target_ip" --dport "$target_port" -j ACCEPT 2>/dev/null || true
     iptables -D FORWARD -p tcp -s "$target_ip" --sport "$target_port" -j ACCEPT 2>/dev/null || true
@@ -239,8 +296,13 @@ modify_port_forward() {
     # 删除旧的iptables规则
     iptables -t nat -D PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "$old_target_ip:$old_target_port" 2>/dev/null || true
     iptables -t nat -D PREROUTING -p udp --dport "$local_port" -j DNAT --to-destination "$old_target_ip:$old_target_port" 2>/dev/null || true
-    iptables -t nat -D POSTROUTING -p tcp -d "$old_target_ip" --dport "$old_target_port" -j MASQUERADE 2>/dev/null || true
-    iptables -t nat -D POSTROUTING -p udp -d "$old_target_ip" --dport "$old_target_port" -j MASQUERADE 2>/dev/null || true
+    if [[ "$PO0_MODE" == "true" && -n "$LAN_IP" ]]; then
+        iptables -t nat -D POSTROUTING -p tcp -d "$old_target_ip" --dport "$old_target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
+        iptables -t nat -D POSTROUTING -p udp -d "$old_target_ip" --dport "$old_target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
+    else
+        iptables -t nat -D POSTROUTING -p tcp -d "$old_target_ip" --dport "$old_target_port" -j MASQUERADE 2>/dev/null || true
+        iptables -t nat -D POSTROUTING -p udp -d "$old_target_ip" --dport "$old_target_port" -j MASQUERADE 2>/dev/null || true
+    fi
     iptables -D FORWARD -p tcp -d "$old_target_ip" --dport "$old_target_port" -j ACCEPT 2>/dev/null || true
     iptables -D FORWARD -p udp -d "$old_target_ip" --dport "$old_target_port" -j ACCEPT 2>/dev/null || true
     iptables -D FORWARD -p tcp -s "$old_target_ip" --sport "$old_target_port" -j ACCEPT 2>/dev/null || true
@@ -249,8 +311,13 @@ modify_port_forward() {
     # 添加新的iptables规则
     iptables -t nat -A PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "$new_target_ip:$new_target_port"
     iptables -t nat -A PREROUTING -p udp --dport "$local_port" -j DNAT --to-destination "$new_target_ip:$new_target_port"
-    iptables -t nat -A POSTROUTING -p tcp -d "$new_target_ip" --dport "$new_target_port" -j MASQUERADE
-    iptables -t nat -A POSTROUTING -p udp -d "$new_target_ip" --dport "$new_target_port" -j MASQUERADE
+    if [[ "$PO0_MODE" == "true" && -n "$LAN_IP" ]]; then
+        iptables -t nat -A POSTROUTING -p tcp -d "$new_target_ip" --dport "$new_target_port" -j SNAT --to-source "$LAN_IP"
+        iptables -t nat -A POSTROUTING -p udp -d "$new_target_ip" --dport "$new_target_port" -j SNAT --to-source "$LAN_IP"
+    else
+        iptables -t nat -A POSTROUTING -p tcp -d "$new_target_ip" --dport "$new_target_port" -j MASQUERADE
+        iptables -t nat -A POSTROUTING -p udp -d "$new_target_ip" --dport "$new_target_port" -j MASQUERADE
+    fi
     iptables -A FORWARD -p tcp -d "$new_target_ip" --dport "$new_target_port" -j ACCEPT
     iptables -A FORWARD -p udp -d "$new_target_ip" --dport "$new_target_port" -j ACCEPT
     iptables -A FORWARD -p tcp -s "$new_target_ip" --sport "$new_target_port" -j ACCEPT
@@ -528,8 +595,13 @@ clear_all_forwards() {
             # 删除iptables规则
             iptables -t nat -D PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port" 2>/dev/null || true
             iptables -t nat -D PREROUTING -p udp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port" 2>/dev/null || true
-            iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
-            iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+            if [[ "$PO0_MODE" == "true" && -n "$LAN_IP" ]]; then
+                iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
+                iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
+            else
+                iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+                iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+            fi
             iptables -D FORWARD -p tcp -d "$target_ip" --dport "$target_port" -j ACCEPT 2>/dev/null || true
             iptables -D FORWARD -p udp -d "$target_ip" --dport "$target_port" -j ACCEPT 2>/dev/null || true
             iptables -D FORWARD -p tcp -s "$target_ip" --sport "$target_port" -j ACCEPT 2>/dev/null || true
@@ -547,19 +619,178 @@ clear_all_forwards() {
     fi
 }
 
+# 重建所有转发规则（切换模式或修改内网IP时使用）
+# 参数: $1=旧PO0_MODE $2=旧LAN_IP
+rebuild_all_forwards() {
+    local old_mode="$1"
+    local old_lan="$2"
+
+    if [[ ! -s "$IPTABLES_RULES_FILE" ]]; then
+        log_info "没有转发规则需要重建"
+        return
+    fi
+
+    backup_iptables
+
+    # 用旧模式删除所有 iptables 规则
+    local save_po0="$PO0_MODE"
+    local save_lan="$LAN_IP"
+    PO0_MODE="$old_mode"
+    LAN_IP="$old_lan"
+
+    while IFS=':' read -r local_port target_ip target_port; do
+        iptables -t nat -D PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port" 2>/dev/null || true
+        iptables -t nat -D PREROUTING -p udp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port" 2>/dev/null || true
+        if [[ "$PO0_MODE" == "true" && -n "$LAN_IP" ]]; then
+            iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
+            iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP" 2>/dev/null || true
+        else
+            iptables -t nat -D POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+            iptables -t nat -D POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+        fi
+        iptables -D FORWARD -p tcp -d "$target_ip" --dport "$target_port" -j ACCEPT 2>/dev/null || true
+        iptables -D FORWARD -p udp -d "$target_ip" --dport "$target_port" -j ACCEPT 2>/dev/null || true
+        iptables -D FORWARD -p tcp -s "$target_ip" --sport "$target_port" -j ACCEPT 2>/dev/null || true
+        iptables -D FORWARD -p udp -s "$target_ip" --sport "$target_port" -j ACCEPT 2>/dev/null || true
+    done < "$IPTABLES_RULES_FILE"
+
+    # 恢复新模式，重新添加所有规则
+    PO0_MODE="$save_po0"
+    LAN_IP="$save_lan"
+
+    while IFS=':' read -r local_port target_ip target_port; do
+        iptables -t nat -A PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port"
+        iptables -t nat -A PREROUTING -p udp --dport "$local_port" -j DNAT --to-destination "$target_ip:$target_port"
+        if [[ "$PO0_MODE" == "true" && -n "$LAN_IP" ]]; then
+            iptables -t nat -A POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP"
+            iptables -t nat -A POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j SNAT --to-source "$LAN_IP"
+        else
+            iptables -t nat -A POSTROUTING -p tcp -d "$target_ip" --dport "$target_port" -j MASQUERADE
+            iptables -t nat -A POSTROUTING -p udp -d "$target_ip" --dport "$target_port" -j MASQUERADE
+        fi
+        iptables -A FORWARD -p tcp -d "$target_ip" --dport "$target_port" -j ACCEPT
+        iptables -A FORWARD -p udp -d "$target_ip" --dport "$target_port" -j ACCEPT
+        iptables -A FORWARD -p tcp -s "$target_ip" --sport "$target_port" -j ACCEPT
+        iptables -A FORWARD -p udp -s "$target_ip" --sport "$target_port" -j ACCEPT
+    done < "$IPTABLES_RULES_FILE"
+
+    persist_iptables
+    log_success "所有转发规则已用新模式重建"
+}
+
+# 切换 po0 模式
+toggle_po0_mode() {
+    echo ""
+    local old_mode="$PO0_MODE"
+    local old_lan="$LAN_IP"
+
+    if [[ "$PO0_MODE" == "true" ]]; then
+        gum style --foreground 33 "=== 关闭 po0 模式 ==="
+        echo ""
+        if gum_confirm "确认关闭 po0 模式？将切换回 MASQUERADE"; then
+            PO0_MODE="false"
+            rebuild_all_forwards "$old_mode" "$old_lan"
+            save_config
+            echo ""
+            gum_success "po0 模式已关闭"
+        else
+            gum style --foreground 240 "操作已取消"
+        fi
+    else
+        gum style --foreground 33 "=== 开启 po0 模式 ==="
+        echo ""
+        if setup_lan_ip; then
+            PO0_MODE="true"
+            rebuild_all_forwards "$old_mode" "$old_lan"
+            save_config
+            echo ""
+            gum_success "po0 模式已开启，内网IP: $LAN_IP"
+        else
+            gum_error "开启 po0 模式失败：无法获取内网IP"
+        fi
+    fi
+}
+
+# 修改内网IP
+change_lan_ip() {
+    echo ""
+    gum style --foreground 33 "=== 修改内网IP ==="
+    echo ""
+
+    if [[ -n "$LAN_IP" ]]; then
+        gum_info "当前内网IP" "$LAN_IP"
+        echo ""
+    fi
+
+    local old_lan="$LAN_IP"
+    local new_ip
+    new_ip=$(gum_input "新内网IP" "请输入新的内网IP地址")
+
+    if [[ -z "$new_ip" ]]; then
+        gum style --foreground 240 "操作已取消"
+        return
+    fi
+
+    if ! validate_ip "$new_ip"; then
+        gum_error "无效的IP地址: $new_ip"
+        return
+    fi
+
+    if gum_confirm "确认将内网IP从 $old_lan 修改为 $new_ip ?"; then
+        LAN_IP="$new_ip"
+        rebuild_all_forwards "$PO0_MODE" "$old_lan"
+        save_config
+        echo ""
+        gum_success "内网IP已修改为: $LAN_IP"
+    else
+        gum style --foreground 240 "操作已取消"
+    fi
+}
+
 # 主菜单（Gum 版本）
 show_menu() {
     echo ""
     gum style --foreground 33 "=== IPTables端口转发管理 ==="
+
+    # 显示 po0 模式状态
+    if [[ "$PO0_MODE" == "true" ]]; then
+        echo -e "    ${GREEN}po0 模式: 开启${NC}  |  ${CYAN}内网IP: $LAN_IP${NC}"
+    else
+        echo -e "    ${YELLOW}po0 模式: 关闭${NC}"
+    fi
+
     echo ""
-    gum_choose "请选择操作" \
-        "➕ 添加端口转发规则" \
-        "❌ 删除端口转发规则" \
-        "✏️  修改端口转发规则" \
-        "📋 显示当前转发规则" \
-        "🗑️  清空所有转发规则" \
-        "💾 显示备份文件" \
-        "🔙 退出"
+
+    # 构建菜单项
+    local po0_label
+    if [[ "$PO0_MODE" == "true" ]]; then
+        po0_label="🔄 切换 po0 模式 (当前: 开启)"
+    else
+        po0_label="🔄 切换 po0 模式 (当前: 关闭)"
+    fi
+
+    if [[ "$PO0_MODE" == "true" ]]; then
+        gum_choose "请选择操作" \
+            "➕ 添加端口转发规则" \
+            "❌ 删除端口转发规则" \
+            "✏️  修改端口转发规则" \
+            "📋 显示当前转发规则" \
+            "🗑️  清空所有转发规则" \
+            "$po0_label" \
+            "🌐 修改内网IP (当前: $LAN_IP)" \
+            "💾 显示备份文件" \
+            "🔙 退出"
+    else
+        gum_choose "请选择操作" \
+            "➕ 添加端口转发规则" \
+            "❌ 删除端口转发规则" \
+            "✏️  修改端口转发规则" \
+            "📋 显示当前转发规则" \
+            "🗑️  清空所有转发规则" \
+            "$po0_label" \
+            "💾 显示备份文件" \
+            "🔙 退出"
+    fi
 }
 
 # 显示备份文件
@@ -587,6 +818,7 @@ main() {
     detect_system
     get_iptables_paths
     init_config_dir
+    load_config
     ensure_ip_forward
 
     # 交互式菜单
@@ -602,7 +834,7 @@ main() {
                 interactive_remove_forward
                 gum_pause
                 ;;
-            *修改*)
+            *修改端口*)
                 interactive_modify_forward
                 gum_pause
                 ;;
@@ -612,6 +844,14 @@ main() {
                 ;;
             *清空*)
                 clear_all_forwards
+                gum_pause
+                ;;
+            *切换*po0*)
+                toggle_po0_mode
+                gum_pause
+                ;;
+            *修改内网IP*)
+                change_lan_ip
                 gum_pause
                 ;;
             *备份*)
